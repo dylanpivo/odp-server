@@ -10,7 +10,7 @@ from odp.api.lib.auth import Authorize
 from odp.api.lib.nextcloud import upload_file_to_nextcloud, delete_folder_from_nextcloud
 from odp.api.lib.paging import Paginator
 from odp.api.models import SubmissionModelIn, SubmissionListItemModel
-from odp.const import ODPScope
+from odp.const import ODPScope, ODPMetadataSchema
 from odp.const.db import SubmissionStatus
 from odp.db import Session
 from odp.db.models import Submission
@@ -215,3 +215,21 @@ async def delete_submission(
     delete_folder_from_nextcloud(submission_id)
 
     submission.delete()
+
+
+@router.put(
+    '/{submission_id}/accept',
+    dependencies=[Depends(Authorize(ODPScope.CATALOG_READ))],
+)
+async def accept_submission(
+        submission_id: int,
+        collection_id: int,
+        schema_type: ODPMetadataSchema
+):
+    if not (submission := Session.get(Submission, submission_id)):
+        raise HTTPException(HTTP_404_NOT_FOUND)
+
+    # set the collection id and the schema type of the submission first.
+    # Then call the translate code to convert the submission metadata to the correct schema
+    # Use the translated metadata and other values to create a new record.
+    # Save the new recordid on the submission so that it can be linked

@@ -5,6 +5,7 @@ from sqlalchemy.orm import deferred, relationship
 
 from odp.db import Base
 from odp.const.db import SubmissionStatus
+from odp.const import ODPMetadataSchema
 
 
 class Submission(Base):
@@ -19,5 +20,9 @@ class Submission(Base):
     status = Column(Enum(SubmissionStatus), nullable=False)
     dataset_file_name = Column(String, nullable=True)
     timestamp = Column(TIMESTAMP(timezone=True))
+    collection_id = Column(String, ForeignKey('collection.id'), nullable=True)
+    schema_id = Column(String, nullable=True)
+
+    collection = relationship('Collection')
 
     _repr_ = 'id', 'status'
