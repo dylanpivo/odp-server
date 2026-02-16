@@ -3,17 +3,25 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from jschon import JSON, URI
 from sqlalchemy import select
 from starlette.status import HTTP_404_NOT_FOUND
 
-from odp.api.lib.auth import Authorize
+from odp.api.lib.auth import Authorize, Authorized
 from odp.api.lib.nextcloud import upload_file_to_nextcloud, delete_folder_from_nextcloud
 from odp.api.lib.paging import Paginator
+from odp.api.lib.record import create_record
+from odp.api.lib.schema import get_metadata_schema
+from odp.api.models import (
+    RecordModel,
+    RecordModelIn,
+)
 from odp.api.models import SubmissionModelIn, SubmissionListItemModel
 from odp.const import ODPScope, ODPMetadataSchema
-from odp.const.db import SubmissionStatus
+from odp.const.db import SubmissionStatus, SchemaType
 from odp.db import Session
-from odp.db.models import Submission
+from odp.db.models import Submission, Schema
+from odp.lib.schema import schema_catalog
 
 router = APIRouter()
 
@@ -36,7 +44,7 @@ async def create_submission(
     submission = Submission(
         data=submission_in.data,
         user_id=submission_in.user_id,
-        status=SubmissionStatus.editing
+        status=SubmissionStatus.in_progress
     )
 
     submission.save()
@@ -98,12 +106,30 @@ async def update_submission(
     submission = result.scalar_one_or_none()
 
     if not submission:
-        raise HTTPException(
-            status_code=404,
-            detail="Submission not found or unauthorized"
-        )
+        raise HTTPException(HTTP_404_NOT_FOUND)
 
     submission.data = submission_data
+
+    submission.save()
+
+    return submission
+
+
+@router.put(
+    '/admin/{submission_id}',
+    dependencies=[Depends(Authorize(ODPScope.CATALOG_READ))]
+)
+async def update_submission_admin(
+        submission_id: int,
+        submission_in: SubmissionModelIn,
+):
+    if not (submission := Session.get(Submission, submission_id)):
+        raise HTTPException(HTTP_404_NOT_FOUND)
+
+    submission.data = submission_in.data
+    submission.status = submission_in.status if submission_in.status else submission.status
+    submission.collection_id = submission_in.collection_id if submission_in.collection_id else submission.collection_id
+    submission.schema_id = submission_in.schema_id if submission_in.schema_id else submission.schema_id
 
     submission.save()
 
@@ -218,18 +244,51 @@ async def delete_submission(
 
 
 @router.put(
-    '/{submission_id}/accept',
+    '/admin/{submission_id}/accept',
     dependencies=[Depends(Authorize(ODPScope.CATALOG_READ))],
 )
 async def accept_submission(
         submission_id: int,
-        collection_id: int,
-        schema_type: ODPMetadataSchema
-):
+        collection_id: str,
+        schema_id: ODPMetadataSchema,
+        auth: Authorized = Depends(Authorize(ODPScope.RECORD_READ))
+) -> RecordModel:
     if not (submission := Session.get(Submission, submission_id)):
         raise HTTPException(HTTP_404_NOT_FOUND)
 
-    # set the collection id and the schema type of the submission first.
-    # Then call the translate code to convert the submission metadata to the correct schema
-    # Use the translated metadata and other values to create a new record.
-    # Save the new recordid on the submission so that it can be linked
+    submission.collection_id = collection_id
+    submission.schema_id = schema_id
+    submission.save()
+
+    schema = Session.get(Schema, (ODPMetadataSchema.SAEON_DATA_SUBMISSION, SchemaType.metadata))
+    data_submission_schema = schema_catalog.get_schema(URI(schema.uri))
+    result = data_submission_schema.evaluate(JSON(submission.data))
+    scheme = _get_scheme(schema_id)
+    translated_metadata = result.output('translation', scheme=scheme, ignore_validity=True)
+
+    record_in = RecordModelIn(
+        sid=f'SAEON-Data_Submission:{submission_id}',
+        collection_id=collection_id,
+        schema_id=schema_id,
+        metadata=translated_metadata
+    )
+
+    datacite_schema = await get_metadata_schema(record_in)
+
+    created_record = create_record(record_in, datacite_schema, auth)
+
+    submission.record_id = created_record.id
+    submission.status = SubmissionStatus.accepted
+    submission.save()
+
+    return created_record
+
+
+def _get_scheme(schema_id: ODPMetadataSchema):
+    match schema_id:
+        case ODPMetadataSchema.SAEON_DATACITE4:
+            return 'saeon/datacite4'
+        case ODPMetadataSchema.SAEON_ISO19115:
+            return 'saeon/iso19115'
+
+    return 'saeon/datacite4'
