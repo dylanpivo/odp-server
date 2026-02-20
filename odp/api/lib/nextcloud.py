@@ -33,11 +33,10 @@ def upload_file_to_nextcloud(local_path_to_file, folder_name, file_name):
             logger.info(f"Success! File uploaded. Status code: {response.status_code}")
             return True
         else:
-            logger.error(f"Error during upload. Status code: {response.status_code}")
-            logger.error(f"Response body: {response.text}")
+            logger.error(f"Error during upload. Status code: {response.status_code}. Response body: {response.text}")
 
     except requests.exceptions.RequestException as e:
-        logger.exception(f"An error occurred: {e}")
+        logger.exception(f"Error during upload: {e}")
 
     return False
 
@@ -56,7 +55,6 @@ def delete_folder_from_nextcloud(folder_name):
 def _clear_and_create_folder(folder_name):
     """Deletes the folder and then re-creates it."""
     folder_url = f"{config.NEXTCLOUD.URL}{NEXTCLOUD_FOLDER}{folder_name}/"
-    auth = (config.NEXTCLOUD.USER, config.NEXTCLOUD.PASSWORD)
 
     delete_folder_from_nextcloud(folder_name)
 

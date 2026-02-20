@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ from sqlalchemy import select
 from starlette.status import HTTP_404_NOT_FOUND
 
 from odp.api.lib.auth import Authorize, Authorized
+from odp.api.lib.utils import remove_empty_elements
 from odp.api.lib.nextcloud import upload_file_to_nextcloud, delete_folder_from_nextcloud
 from odp.api.lib.paging import Paginator
 from odp.api.lib.record import create_record
@@ -119,7 +121,7 @@ async def update_submission(
     '/admin/{submission_id}',
     dependencies=[Depends(Authorize(ODPScope.CATALOG_READ))]
 )
-async def update_submission_admin(
+async def admin_update_submission(
         submission_id: int,
         submission_in: SubmissionModelIn,
 ):
@@ -260,9 +262,13 @@ async def accept_submission(
     submission.schema_id = schema_id
     submission.save()
 
+    _add_system_fields(submission.data)
+
+    cleaned_metadata = remove_empty_elements(submission.data)
+
     schema = Session.get(Schema, (ODPMetadataSchema.SAEON_DATA_SUBMISSION, SchemaType.metadata))
     data_submission_schema = schema_catalog.get_schema(URI(schema.uri))
-    result = data_submission_schema.evaluate(JSON(submission.data))
+    result = data_submission_schema.evaluate(JSON(cleaned_metadata))
     scheme = _get_scheme(schema_id)
     translated_metadata = result.output('translation', scheme=scheme, ignore_validity=True)
 
@@ -282,6 +288,11 @@ async def accept_submission(
     submission.save()
 
     return created_record
+
+
+def _add_system_fields(metadata: dict):
+    metadata['timestamp'] = datetime.now().strftime("%Y-%m-%d")
+    metadata['language'] = 'en-us'
 
 
 def _get_scheme(schema_id: ODPMetadataSchema):
