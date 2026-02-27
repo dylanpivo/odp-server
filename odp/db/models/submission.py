@@ -14,6 +14,7 @@ class Submission(Base):
     __tablename__ = 'submission'
 
     id = Column(Integer, Identity(), primary_key=True)
+    doi = Column(String, unique=True)
     user_id = Column(String, nullable=False)
     data = Column(JSONB, nullable=False)
     status = Column(Enum(SubmissionStatus), nullable=False)

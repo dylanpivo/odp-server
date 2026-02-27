@@ -3,7 +3,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from jschon import JSON, URI
 from sqlalchemy import select
 from starlette.status import HTTP_404_NOT_FOUND
@@ -24,6 +24,7 @@ from odp.const.db import SubmissionStatus, SchemaType
 from odp.db import Session
 from odp.db.models import Submission, Schema
 from odp.lib.schema import schema_catalog
+from odp.const import DOI_REGEX
 
 router = APIRouter()
 
@@ -253,29 +254,30 @@ async def accept_submission(
         submission_id: int,
         collection_id: str,
         schema_id: ODPMetadataSchema,
-        auth: Authorized = Depends(Authorize(ODPScope.RECORD_READ))
-) -> RecordModel:
+        auth: Authorized = Depends(Authorize(ODPScope.RECORD_READ)),
+        doi: str = Query(..., pattern=DOI_REGEX)
+) -> bool:
     if not (submission := Session.get(Submission, submission_id)):
         raise HTTPException(HTTP_404_NOT_FOUND)
 
     submission.collection_id = collection_id
     submission.schema_id = schema_id
+    submission.doi = doi
     submission.save()
 
-    _add_system_fields(submission.data)
+    _add_additional_metadata_fields(submission, schema_id == ODPMetadataSchema.SAEON_ISO19115)
 
     cleaned_metadata = remove_empty_elements(submission.data)
 
     schema = Session.get(Schema, (ODPMetadataSchema.SAEON_DATA_SUBMISSION, SchemaType.metadata))
     data_submission_schema = schema_catalog.get_schema(URI(schema.uri))
     result = data_submission_schema.evaluate(JSON(cleaned_metadata))
-    scheme = _get_scheme(schema_id)
-    translated_metadata = result.output('translation', scheme=scheme, ignore_validity=True)
+    translated_metadata = result.output('translation', scheme='saeon/datacite4', ignore_validity=True)
 
     record_in = RecordModelIn(
-        sid=f'SAEON-Data_Submission:{submission_id}',
+        doi=doi,
         collection_id=collection_id,
-        schema_id=schema_id,
+        schema_id=ODPMetadataSchema.SAEON_DATACITE4,
         metadata=translated_metadata
     )
 
@@ -287,19 +289,21 @@ async def accept_submission(
     submission.status = SubmissionStatus.accepted
     submission.save()
 
-    return created_record
+    return True
 
 
-def _add_system_fields(metadata: dict):
-    metadata['timestamp'] = datetime.now().strftime("%Y-%m-%d")
-    metadata['language'] = 'en-us'
+def _add_additional_metadata_fields(submission: Submission, is_iso: bool = False):
+    submission.data['timestamp'] = datetime.now().strftime("%Y-%m-%d")
+    submission.data['language'] = 'en-us'
+    submission.data['doi'] = submission.doi
 
-
-def _get_scheme(schema_id: ODPMetadataSchema):
-    match schema_id:
-        case ODPMetadataSchema.SAEON_DATACITE4:
-            return 'saeon/datacite4'
-        case ODPMetadataSchema.SAEON_ISO19115:
-            return 'saeon/iso19115'
-
-    return 'saeon/datacite4'
+    if is_iso:
+        if 'related_identifiers' not in submission.data:
+            submission.data['related_identifiers'] = []
+        submission.data['related_identifiers'].append({
+            "related_identifier": "https://odp.saeon.ac.za/schema/metadata/saeon/iso19115",
+            "relationship_type": "HasMetadata",
+            "related_metadata_scheme": "ISO 19115-1",
+            "scheme_uri": "https://schemas.isotc211.org/19115/",
+            "scheme_type": "JSON"
+        })
