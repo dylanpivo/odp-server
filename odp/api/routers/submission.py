@@ -9,22 +9,21 @@ from sqlalchemy import select
 from starlette.status import HTTP_404_NOT_FOUND
 
 from odp.api.lib.auth import Authorize, Authorized
-from odp.api.lib.utils import remove_empty_elements
 from odp.api.lib.nextcloud import upload_file_to_nextcloud, delete_folder_from_nextcloud
 from odp.api.lib.paging import Paginator
 from odp.api.lib.record import create_record
 from odp.api.lib.schema import get_metadata_schema
+from odp.api.lib.utils import remove_empty_elements
 from odp.api.models import (
-    RecordModel,
     RecordModelIn,
 )
 from odp.api.models import SubmissionModelIn, SubmissionListItemModel
+from odp.const import DOI_REGEX
 from odp.const import ODPScope, ODPMetadataSchema
 from odp.const.db import SubmissionStatus, SchemaType
 from odp.db import Session
 from odp.db.models import Submission, Schema
 from odp.lib.schema import schema_catalog
-from odp.const import DOI_REGEX
 
 router = APIRouter()
 
@@ -37,9 +36,49 @@ def submission_list_item_model(submission: Submission) -> SubmissionListItemMode
     )
 
 
+# user: list, detail, create, data upload, submit, delete
+@router.get(
+    '/user_submissions',
+    dependencies=[Depends(Authorize(ODPScope.SUBMISSION_READ))],
+)
+async def list_user_submissions(
+        user_id: str,
+        paginator: Paginator = Depends(),
+):
+    stmt = (select(Submission).where(Submission.user_id == user_id))
+
+    return paginator.paginate(
+        stmt,
+        lambda row: submission_list_item_model(row.Submission),
+        sort='submission.id'
+    )
+
+
+@router.get(
+    '/{submission_id}',
+    dependencies=[Depends(Authorize(ODPScope.SUBMISSION_READ))],
+)
+async def get_submission(
+        submission_id: int,
+        user_id: str,
+):
+    stmt = select(Submission).where(
+        Submission.id == submission_id,
+        Submission.user_id == user_id
+    )
+
+    result = Session.execute(stmt)
+    submission = result.scalar_one_or_none()
+
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    return submission
+
+
 @router.post(
     '/',
-    dependencies=[Depends(Authorize(ODPScope.CATALOG_READ))],
+    dependencies=[Depends(Authorize(ODPScope.SUBMISSION_WRITE))],
 )
 async def create_submission(
         submission_in: SubmissionModelIn,
@@ -56,8 +95,35 @@ async def create_submission(
 
 
 @router.put(
+    '/{submission_id}',
+    dependencies=[Depends(Authorize(ODPScope.SUBMISSION_WRITE))],
+)
+async def update_submission(
+        submission_id: int,
+        submission_data: dict[str, Any],
+        user_id: str,
+):
+    statement = select(Submission).where(
+        Submission.id == submission_id,
+        Submission.user_id == user_id
+    )
+
+    result = Session.execute(statement)
+    submission = result.scalar_one_or_none()
+
+    if not submission:
+        raise HTTPException(HTTP_404_NOT_FOUND)
+
+    submission.data = submission_data
+
+    submission.save()
+
+    return submission
+
+
+@router.put(
     '/{submission_id}/upload',
-    dependencies=[Depends(Authorize(ODPScope.CATALOG_READ))],
+    dependencies=[Depends(Authorize(ODPScope.SUBMISSION_WRITE))],
 )
 async def dataset_upload(
         submission_id: int,
@@ -91,13 +157,12 @@ async def dataset_upload(
         await file.close()
 
 
-@router.put(
-    '/{submission_id}',
-    dependencies=[Depends(Authorize(ODPScope.CATALOG_READ))]
+@router.post(
+    '/submit/{submission_id}',
+    dependencies=[Depends(Authorize(ODPScope.SUBMISSION_WRITE))],
 )
-async def update_submission(
+async def submit_submission(
         submission_id: int,
-        submission_data: dict[str, Any],
         user_id: str,
 ):
     statement = select(Submission).where(
@@ -111,44 +176,6 @@ async def update_submission(
     if not submission:
         raise HTTPException(HTTP_404_NOT_FOUND)
 
-    submission.data = submission_data
-
-    submission.save()
-
-    return submission
-
-
-@router.put(
-    '/admin/{submission_id}',
-    dependencies=[Depends(Authorize(ODPScope.CATALOG_READ))]
-)
-async def admin_update_submission(
-        submission_id: int,
-        submission_in: SubmissionModelIn,
-):
-    if not (submission := Session.get(Submission, submission_id)):
-        raise HTTPException(HTTP_404_NOT_FOUND)
-
-    submission.data = submission_in.data
-    submission.status = submission_in.status if submission_in.status else submission.status
-    submission.collection_id = submission_in.collection_id if submission_in.collection_id else submission.collection_id
-    submission.schema_id = submission_in.schema_id if submission_in.schema_id else submission.schema_id
-
-    submission.save()
-
-    return submission
-
-
-@router.post(
-    '/submit/{submission_id}',
-    dependencies=[Depends(Authorize(ODPScope.CATALOG_READ))],
-)
-async def submit_submission(
-        submission_id: int,
-):
-    if not (submission := Session.get(Submission, submission_id)):
-        raise HTTPException(HTTP_404_NOT_FOUND)
-
     submission.status = SubmissionStatus.submitted
 
     submission.save()
@@ -156,9 +183,33 @@ async def submit_submission(
     return submission
 
 
+@router.delete(
+    '/{submission_id}',
+    dependencies=[Depends(Authorize(ODPScope.SUBMISSION_DELETE))],
+)
+async def delete_submission(
+        submission_id: int,
+        user_id: str,
+):
+    stmt = select(Submission).where(
+        Submission.id == submission_id,
+        Submission.user_id == user_id
+    )
+
+    result = Session.execute(stmt)
+    submission = result.scalar_one_or_none()
+
+    if not submission:
+        raise HTTPException(HTTP_404_NOT_FOUND)
+
+    delete_folder_from_nextcloud(submission_id)
+
+    submission.delete()
+
+
 @router.get(
     '/',
-    dependencies=[Depends(Authorize(ODPScope.CATALOG_READ))],
+    dependencies=[Depends(Authorize(ODPScope.SUBMISSION_ADMIN))],
 )
 async def list_submissions(
         paginator: Paginator = Depends(),
@@ -177,49 +228,10 @@ async def list_submissions(
 
 
 @router.get(
-    '/user_submissions',
-    dependencies=[Depends(Authorize(ODPScope.CATALOG_READ))],
-)
-async def list_user_submissions(
-        user_id: str,
-        paginator: Paginator = Depends(),
-):
-    stmt = (select(Submission).where(Submission.user_id == user_id))
-
-    return paginator.paginate(
-        stmt,
-        lambda row: submission_list_item_model(row.Submission),
-        sort='submission.id'
-    )
-
-
-@router.get(
-    '/{submission_id}',
-    dependencies=[Depends(Authorize(ODPScope.CATALOG_READ))],
-)
-async def get_submission(
-        submission_id: int,
-        user_id: str,
-):
-    stmt = select(Submission).where(
-        Submission.id == submission_id,
-        Submission.user_id == user_id
-    )
-
-    result = Session.execute(stmt)
-    submission = result.scalar_one_or_none()
-
-    if not submission:
-        raise HTTPException(status_code=404, detail="Submission not found")
-
-    return submission
-
-
-@router.get(
     '/admin/{submission_id}',
-    dependencies=[Depends(Authorize(ODPScope.RECORD_READ))],
+    dependencies=[Depends(Authorize(ODPScope.SUBMISSION_ADMIN))],
 )
-async def get_submission(
+async def admin_get_submission(
         submission_id: int
 ):
     if not (submission := Session.get(Submission, submission_id)):
@@ -231,11 +243,32 @@ async def get_submission(
     return submission
 
 
+@router.put(
+    '/admin/{submission_id}',
+    dependencies=[Depends(Authorize(ODPScope.SUBMISSION_ADMIN))],
+)
+async def admin_update_submission(
+        submission_id: int,
+        submission_in: SubmissionModelIn,
+):
+    if not (submission := Session.get(Submission, submission_id)):
+        raise HTTPException(HTTP_404_NOT_FOUND)
+
+    submission.data = submission_in.data
+    submission.status = submission_in.status if submission_in.status else submission.status
+    submission.collection_id = submission_in.collection_id if submission_in.collection_id else submission.collection_id
+    submission.schema_id = submission_in.schema_id if submission_in.schema_id else submission.schema_id
+
+    submission.save()
+
+    return submission
+
+
 @router.delete(
     '/{submission_id}',
-    dependencies=[Depends(Authorize(ODPScope.CATALOG_READ))],
+    dependencies=[Depends(Authorize(ODPScope.SUBMISSION_ADMIN))],
 )
-async def delete_submission(
+async def admin_delete_submission(
         submission_id: int,
 ):
     if not (submission := Session.get(Submission, submission_id)):
@@ -248,7 +281,7 @@ async def delete_submission(
 
 @router.put(
     '/admin/{submission_id}/accept',
-    dependencies=[Depends(Authorize(ODPScope.CATALOG_READ))],
+    dependencies=[Depends(Authorize(ODPScope.SUBMISSION_ADMIN))],
 )
 async def accept_submission(
         submission_id: int,
