@@ -265,7 +265,7 @@ async def admin_update_submission(
 
 
 @router.delete(
-    '/{submission_id}',
+    '/admin/{submission_id}',
     dependencies=[Depends(Authorize(ODPScope.SUBMISSION_ADMIN))],
 )
 async def admin_delete_submission(
