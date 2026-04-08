@@ -21,6 +21,7 @@ werkzeug
 itsdangerous
 requests
 python-multipart
+reportlab
 
 # deployment
 uvicorn
