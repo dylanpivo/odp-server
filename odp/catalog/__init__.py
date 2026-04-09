@@ -329,6 +329,7 @@ class Catalog:
                 catalog_record.error_count = 0
                 synced += 1
             except Exception as e:
+                logger.error(f'{self.catalog_id} catalog: Failed to sync record {catalog_record.record_id}: {repr(e)}')
                 catalog_record.error = repr(e)
                 catalog_record.error_count += 1
 
@@ -439,10 +440,18 @@ def publish_all():
 
     logger.info('PUBLISHING STARTED')
     try:
+        count = 0
         for catalog_id, catalog_cls in catalog_classes.items():
             catalog_cls(catalog_id).publish()
 
         logger.info('PUBLISHING FINISHED')
+    except AttributeError as e:
+        # Handle schema-related errors (like NoneType in datacite_metadata)
+        logger.warning(f'No valid DataCite metadata or schema issue in catalog {catalog_id}: {str(e)}')
+
+    except Exception as e:
+        # Handle any unexpected issues but continue other catalogs
+        logger.critical(f'PUBLISHING FAILED for catalog {catalog_id}: {str(e)}', exc_info=True)
 
     except Exception as e:
         logger.critical(f'PUBLISHING ABORTED: {str(e)}')
