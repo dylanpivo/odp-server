@@ -11,7 +11,7 @@ from starlette.status import HTTP_404_NOT_FOUND
 from odp.api.lib.auth import Authorize, Authorized
 from odp.api.lib.nextcloud import upload_file_to_nextcloud, delete_folder_from_nextcloud
 from odp.api.lib.paging import Paginator
-from odp.api.lib.record import create_record
+from odp.api.lib.record import create_new_record
 from odp.api.lib.schema import get_metadata_schema
 from odp.api.lib.utils import remove_empty_elements
 from odp.api.models import (
@@ -316,7 +316,7 @@ async def accept_submission(
 
     datacite_schema = await get_metadata_schema(record_in)
 
-    created_record = create_record(record_in, datacite_schema, auth)
+    created_record = create_new_record(record_in, datacite_schema, auth)
 
     submission.record_id = created_record.id
     submission.status = SubmissionStatus.accepted
