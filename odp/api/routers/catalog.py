@@ -1,25 +1,30 @@
+import logging
 import re
 from datetime import date
 from enum import Enum
 from functools import partial
 from math import ceil
-from typing import Any, Optional
+from typing import Any, Optional, List
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
+from fastapi.responses import RedirectResponse, StreamingResponse, FileResponse
+from starlette.background import BackgroundTask
+import os
 from jschon import JSONPointer
 from jschon.exc import JSONPointerMalformedError, JSONPointerReferenceError
-from pydantic import Json
+from pydantic import BaseModel, Field, Json
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.orm import aliased, load_only
 from starlette.status import HTTP_404_NOT_FOUND, HTTP_422_UNPROCESSABLE_ENTITY
 
 from odp.api.lib.auth import Authorize
+from odp.config import config
 from odp.api.lib.datacite import get_datacite_client
 from odp.api.lib.paging import Page, Paginator
 from odp.api.lib.utils import output_published_record_model
-from odp.api.models import (CatalogModel, CatalogModelWithData, PublishedDataCiteRecordModel, PublishedSAEONRecordModel, RetractedRecordModel,
+from odp.api.models import (CatalogModel, CatalogModelWithData, PublishedDataCiteRecordModel, PublishedSAEONRecordModel,
+                            RetractedRecordModel,
                             SearchResult)
 from odp.const import DOI_REGEX, ODPCatalog, ODPScope
 from odp.db import Session
@@ -27,11 +32,28 @@ from odp.db.models import Catalog, CatalogRecord, CatalogRecordFacet, PublishedR
 from odp.lib.datacite import DataciteClient, DataciteError
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class SearchResultSort(str, Enum):
     TIMESTAMP_DESC = 'timestamp desc'
     RANK_DESC = 'rank desc'
+
+
+class UserData(BaseModel):
+    """User information for audit logging."""
+    name: str = Field(..., description="Full name of the user", min_length=1)
+    email: str = Field(..., description="Email address of the user", min_length=1)
+    organisation: str = Field(..., description="Organization or institution name", min_length=1)
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "name": "John Smith",
+                "email": "john@example.com",
+                "organisation": "University"
+            }
+        }
 
 
 @router.get(
@@ -243,19 +265,19 @@ async def search_records(
     facets = {}
     facet_subquery = select(CatalogRecordFacet).subquery()
     for row in Session.execute(
-        select(
-            facet_subquery.c.facet,
-            facet_subquery.c.value,
-            func.count(),
-        )
-        .join_from(
-            stmt.subquery(),
-            facet_subquery,
-        )
-        .group_by(
-            facet_subquery.c.facet,
-            facet_subquery.c.value,
-        )
+            select(
+                facet_subquery.c.facet,
+                facet_subquery.c.value,
+                func.count(),
+            )
+                    .join_from(
+                stmt.subquery(),
+                facet_subquery,
+            )
+                    .group_by(
+                facet_subquery.c.facet,
+                facet_subquery.c.value,
+            )
     ):
         facets.setdefault(row.facet, [])
         facets[row.facet] += [(row.value, row.count)]
@@ -386,3 +408,144 @@ async def redirect_to(
     url += catalog_record.record.doi if catalog_record.record.doi else catalog_record.record_id
 
     return RedirectResponse(url)
+
+
+@router.get(
+    '/{catalog_id}/subset',
+    response_model=SearchResult,
+    dependencies=[Depends(Authorize(ODPScope.CATALOG_SEARCH))],
+    description="Return a catalog's subset published records.",
+)
+async def records_subset(
+        catalog_id: str,
+        record_id_or_doi_list: List[str] = Query(..., alias="record_id_or_doi_list"),
+        page: int = 1,
+        size: int = 50
+):
+    if not Session.get(Catalog, catalog_id):
+        raise HTTPException(HTTP_404_NOT_FOUND)
+
+    stmt = (
+        select(CatalogRecord)
+        .where(CatalogRecord.catalog_id == catalog_id)
+        .where(CatalogRecord.record_id.in_(record_id_or_doi_list))
+        .where(CatalogRecord.published)
+        .where(CatalogRecord.searchable)
+    )
+
+    total = Session.execute(
+        select(func.count())
+        .select_from(stmt.subquery())
+    ).scalar_one()
+
+    order_by = CatalogRecord.timestamp.desc()
+
+    limit = size or total
+    items = [
+        output_published_record_model(row.CatalogRecord) for row in Session.execute(
+            stmt.
+            order_by(order_by).
+            offset(limit * (page - 1)).
+            limit(limit)
+        )
+    ]
+
+    facets = {}
+    facet_subquery = select(CatalogRecordFacet).subquery()
+    for row in Session.execute(
+            select(
+                facet_subquery.c.facet,
+                facet_subquery.c.value,
+                func.count(),
+            )
+                    .join_from(
+                stmt.subquery(),
+                facet_subquery,
+            )
+                    .group_by(
+                facet_subquery.c.facet,
+                facet_subquery.c.value,
+            )
+    ):
+        facets.setdefault(row.facet, [])
+        facets[row.facet] += [(row.value, row.count)]
+
+    return SearchResult(
+        facets=facets,
+        items=items,
+        total=total,
+        page=page,
+        pages=ceil(total / limit) if limit else 0,
+    )
+
+
+@router.post(
+    '/generate-zip-bundle',
+    response_class=FileResponse,
+    summary='Generate server-side ZIP bundle',
+    description='Generate a server-side ZIP file containing metadata PDFs and data files for selected records',
+    status_code=200,
+    dependencies=[Depends(Authorize(ODPScope.CATALOG_READ))],
+)
+def generate_zip_bundle(
+        record_ids: list[str],
+        user_data: UserData,
+        request: Request
+):
+    """
+    Generate ZIP bundle with metadata PDFs and data files.
+
+    Explicit parameters:
+    - **record_ids**: List of DOIs to include (non-empty array)
+    - **user_data**: User information object with name, email, organisation (all required)
+
+    The endpoint automatically extracts client IP and user-agent from HTTP headers
+    for audit logging purposes.
+
+    Returns binary ZIP file with structure:
+        /Record_Title/metadata.pdf
+        /Record_Title/data_file
+
+    Response headers:
+    - X-Bundle-Record-Count: Number of successfully processed records
+    - X-Bundle-Failed-Count: Number of failed records
+    """
+    try:
+        # Extract user data and request metadata
+
+        client_ip = request.client.host if request.client else None
+        user_agent = request.headers.get('user-agent')
+
+        # Delegate to library function for ZIP generation
+        from odp.lib.bundle_generator import create_zip_bundle
+
+        temp_zip_path, metadata = create_zip_bundle(
+            record_ids=record_ids,
+            user_data=user_data.dict(),
+            client_ip=client_ip,
+            user_agent=user_agent,
+            catalog_url=config.ODP.API_URL,
+        )
+
+        background_task = BackgroundTask(os.remove, temp_zip_path)
+
+        # Return file response with metadata headers and async cleanup
+        return FileResponse(
+            temp_zip_path,
+            media_type='application/zip',
+            filename="records.zip",
+            background=background_task,
+            headers={
+                'X-Bundle-Record-Count': str(metadata['record_count']),
+                'X-Bundle-Failed-Count': str(metadata['failed_count']),
+            }
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        logger.warning(f"ZIP generation validation error: {str(e)}")
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        logger.error(f"ZIP generation error: {str(e)}")
+        raise HTTPException(500, "Internal server error")

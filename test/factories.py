@@ -31,9 +31,11 @@ from odp.db.models import (
     Vocabulary,
 )
 from test import datacite4_example, iso19115_example, eml_example
+
+from odp.const.db import SubmissionStatus
 from odp.db import Session
-from odp.db.models import (Catalog, Client, Collection, CollectionTag, Provider, Record, RecordTag, Role, Schema, Scope, Tag, User,
-                           Vocabulary, VocabularyTerm)
+from odp.db.models import (Catalog, Client, Collection, CollectionTag, Provider, Record, RecordTag, Role, Schema, Scope,
+                           Submission, Tag, User, Vocabulary, VocabularyTerm)
 from test import datacite4_example, iso19115_example
 
 FactorySession = scoped_session(sessionmaker(
@@ -482,3 +484,21 @@ class ArchiveResourceFactory(ODPModelFactory):
     path = factory.Sequence(lambda n: f'{fake.uri(deep=randint(1, 4))}.{n}')
     status = factory.LazyFunction(lambda: choices(('pending', 'valid', 'missing', 'corrupt'), weights=(4, 14, 1, 1))[0])
     timestamp = factory.LazyFunction(lambda: datetime.now(timezone.utc))
+                Session.commit()
+
+
+class SubmissionFactory(ODPModelFactory):
+    class Meta:
+        model = Submission
+
+    doi = factory.Sequence(lambda n: f'10.5555/TestSubmission-{n}')
+    user_id = factory.Faker('uuid4')
+    data = factory.Sequence(lambda n: dict(foo=f'{fake.catch_phrase()}.{n}'))
+    status = factory.LazyFunction(lambda: choice(list(SubmissionStatus)))
+    dataset_file_name = factory.LazyFunction(lambda: f'{fake.word()}.zip' if randint(0, 1) else None)
+    timestamp = factory.LazyFunction(lambda: datetime.now(timezone.utc))
+    
+    collection = factory.SubFactory(CollectionFactory)
+    schema_id = factory.LazyFunction(lambda: choice(('SAEON.DataCite4', 'SAEON.ISO19115')))
+    record = factory.SubFactory(RecordFactory)
+

@@ -10,6 +10,10 @@ SAEON.EML:
   type: metadata
   uri: https://odp.saeon.ac.za/schema/metadata/saeon/eml
   template_uri: https://odp.saeon.ac.za/schema/metadata/saeon/eml-template
+  
+SAEON.DataSubmission:
+  type: metadata
+  uri: https://odp.saeon.ac.za/schema/metadata/saeon/data-submission
 
 DataCite.4.3:
   type: metadata
